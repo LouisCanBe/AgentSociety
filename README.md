@@ -7,7 +7,7 @@
 # 🚀 AgentSociety
 ![License](https://img.shields.io/badge/license-MIT-green) &ensp;
 [![Online Documentation](https://img.shields.io/badge/docs-online-blue)](https://agentsociety.readthedocs.io/en/latest/) &ensp;
-
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/LouisCanBe/AgentSociety)
 
 AgentSociety is an advanced framework specifically designed for building agents in urban simulation environments. With AgentSociety, you can easily create and manage agents, enabling complex urban scenarios to be modeled and simulated efficiently.
 
