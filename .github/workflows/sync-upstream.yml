@@ -1,0 +1,190 @@
+name: Sync Upstream
+
+on:
+  # 每天北京时间早上8点运行（UTC时间0点）
+  schedule:
+    - cron: '0 0 * * *'
+  
+  # 也可以手动触发
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout fork
+      uses: actions/checkout@v4
+      with:
+        # 使用默认token，确保有推送权限
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+    
+    - name: Configure Git
+      run: |
+        git config --global user.name 'github-actions[bot]'
+        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+    
+    - name: Setup upstream remote
+      run: |
+        git remote add upstream https://github.com/tsinghua-fib-lab/AgentSociety.git
+        git fetch upstream
+        git fetch origin
+    
+    - name: Check for updates
+      id: check
+      run: |
+        # 检查是否有新的提交
+        LOCAL=$(git rev-parse origin/main)
+        REMOTE=$(git rev-parse upstream/main)
+        echo "Local commit: $LOCAL"
+        echo "Upstream commit: $REMOTE"
+        
+        if [ "$LOCAL" != "$REMOTE" ]; then
+          echo "updates=true" >> $GITHUB_OUTPUT
+          echo "📦 发现upstream有新更新"
+        else
+          echo "updates=false" >> $GITHUB_OUTPUT
+          echo "✅ 已经是最新版本"
+        fi
+    
+    - name: Backup current state
+      if: steps.check.outputs.updates == 'true'
+      run: |
+        # 创建备份分支
+        BACKUP_BRANCH="backup-before-sync-$(date +%Y%m%d-%H%M%S)"
+        git checkout -b $BACKUP_BRANCH
+        git push origin $BACKUP_BRANCH
+        echo "✅ 创建备份分支: $BACKUP_BRANCH"
+        git checkout main
+    
+    - name: Sync with upstream
+      if: steps.check.outputs.updates == 'true'
+      run: |
+        echo "🔄 开始同步upstream..."
+        
+        # 尝试rebase（保持线性历史）
+        if git rebase upstream/main; then
+          echo "✅ Rebase成功"
+          
+          # 推送更新（可能需要强制推送）
+          if git push origin main; then
+            echo "✅ 推送成功"
+          else
+            echo "⚠️  普通推送失败，尝试强制推送..."
+            git push --force-with-lease origin main
+            echo "✅ 强制推送成功"
+          fi
+          
+        else
+          echo "❌ Rebase失败，尝试合并策略..."
+          git rebase --abort
+          
+          # 如果rebase失败，使用merge
+          if git merge upstream/main --no-edit; then
+            echo "✅ 合并成功"
+            git push origin main
+            echo "✅ 推送成功"
+          else
+            echo "❌ 合并也失败了"
+            exit 1
+          fi
+        fi
+    
+    - name: Create summary
+      if: steps.check.outputs.updates == 'true' && success()
+      run: |
+        echo "## 🎉 同步成功!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ 已成功同步上游仓库的最新更改" >> $GITHUB_STEP_SUMMARY
+        echo "- 📦 同步的commit: \`$(git rev-parse upstream/main)\`" >> $GITHUB_STEP_SUMMARY
+        echo "- 🕐 同步时间: $(date)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 最近的上游提交:" >> $GITHUB_STEP_SUMMARY
+        git log --oneline -5 upstream/main >> $GITHUB_STEP_SUMMARY
+    
+    - name: Create Issue on Conflict
+      if: failure() && steps.check.outputs.updates == 'true'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const title = '🔀 自动同步上游仓库失败';
+          const body = `## 自动同步失败 ❌
+          
+          自动同步上游仓库时遇到冲突，需要手动解决。
+          
+          ### 可能的原因
+          - 本地修改与上游更改产生冲突
+          - 上游有破坏性的更改
+          - 文件被删除或重命名
+          
+          ### 手动解决步骤
+          
+          1. **克隆并设置仓库**:
+          \`\`\`bash
+          git clone https://github.com/${context.repo.owner}/${context.repo.repo}.git
+          cd ${context.repo.repo}
+          git remote add upstream https://github.com/tsinghua-fib-lab/AgentSociety.git
+          git fetch upstream
+          \`\`\`
+          
+          2. **尝试rebase**:
+          \`\`\`bash
+          git rebase upstream/main
+          \`\`\`
+          
+          3. **如果有冲突，解决冲突**:
+          \`\`\`bash
+          # 编辑冲突文件，解决冲突
+          git add .
+          git rebase --continue
+          \`\`\`
+          
+          4. **推送更改**:
+          \`\`\`bash
+          git push --force-with-lease origin main
+          \`\`\`
+          
+          ### 其他选项
+          
+          如果rebase太复杂，可以使用merge策略：
+          \`\`\`bash
+          git rebase --abort
+          git merge upstream/main
+          # 解决冲突
+          git add .
+          git commit
+          git push origin main
+          \`\`\`
+          
+          ---
+          
+          🔗 **工作流运行**: [查看详情](${context.payload.repository.html_url}/actions/runs/${context.runId})
+          ⏰ **失败时间**: ${new Date().toISOString()}
+          `;
+          
+          // 检查是否已经有相同的issue
+          const existingIssues = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'open',
+            labels: 'sync-failure'
+          });
+          
+          if (existingIssues.data.length === 0) {
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['sync-failure', 'automation']
+            });
+          } else {
+            // 更新现有issue
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: existingIssues.data[0].number,
+              body: `## 新的同步失败 ⚠️\n\n**时间**: ${new Date().toISOString()}\n**工作流**: [查看详情](${context.payload.repository.html_url}/actions/runs/${context.runId})`
+            });
+          } 
